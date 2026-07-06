@@ -5,9 +5,9 @@
   OCR Manuscrit — Extracteur de texte manuscrit avec validation NLP
 =============================================================================
 
-Script CLI single-file qui extrait du texte depuis des images manuscrites
-en utilisant un double moteur OCR (EasyOCR + TrOCR via HF API), avec
-validation NLP et métriques de qualité.
+Multi-engine OCR pipeline: EasyOCR (local), Gemini Vision (API),
+Mistral OCR (API), with NLP validation, quality metrics, and
+AI-powered analysis.
 
 Usage:
     python ocr.py image.jpg
@@ -15,10 +15,12 @@ Usage:
     python ocr.py image.jpg --verbose
     python ocr.py image.jpg --lang en fr
 
-Dépendances: easyocr, requests, Pillow, opencv-python-headless, jiwer
+Dépendances: easyocr, requests, Pillow, opencv-python-headless, jiwer,
+             google-genai, mistralai
 """
 
 import argparse
+import base64
 import difflib
 import io
 import json
@@ -79,7 +81,6 @@ def custom_urlretrieve(url, filename, reporthook=None, data=None):
 
 def custom_urlopen(url, data=None, timeout=None):
     try:
-        # Just a simple wrapper for urlopen using requests
         resp = requests.get(url if isinstance(url, str) else url.get_full_url(), timeout=timeout or 30)
         resp.raise_for_status()
         class DummyResponse:
@@ -106,6 +107,20 @@ try:
     JIWER_AVAILABLE = True
 except ImportError:
     JIWER_AVAILABLE = False
+
+# Gemini — optionnel
+try:
+    from google import genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
+# Mistral — optionnel
+try:
+    from mistralai import Mistral
+    MISTRAL_AVAILABLE = True
+except ImportError:
+    MISTRAL_AVAILABLE = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -270,86 +285,197 @@ def ocr_easyocr(image_path: str, languages: list[str] = None) -> dict:
         "elapsed_seconds": round(elapsed, 2),
     }
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 2.B. MOTEUR OCR — PaddleOCR (local, très précis)
+# 2.B. MOTEUR OCR — Gemini Vision (Google AI API)
 # ─────────────────────────────────────────────────────────────────────────────
-def ocr_paddleocr(image_path: str, languages: list[str] = None) -> dict:
+def ocr_gemini(image_path: str, api_key: str = None) -> dict:
     """
-    Exécute PaddleOCR sur une image.
+    Exécute Gemini Vision OCR sur une image manuscrite.
+    
+    Utilise le modèle gemini-2.0-flash avec vision pour extraire
+    le texte manuscrit d'une image.
+    
+    Returns:
+        dict avec:
+        - text: texte extrait
+        - engine: "gemini"
+        - elapsed_seconds: temps d'exécution
+        - model: nom du modèle utilisé
     """
-    if languages is None:
-        languages = ["en"]
-        
-    lang_map = {"en": "en", "fr": "french"}
-    p_lang = lang_map.get(languages[0], "en")
-    if "fr" in languages and "en" in languages:
-        p_lang = "french"
-        
-    print(f"🔍 PaddleOCR — Analyse en cours (lang: {p_lang})...")
+    api_key = api_key or os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("ℹ️  Gemini — Ignoré (GEMINI_API_KEY non défini)")
+        return None
+    
+    if not GEMINI_AVAILABLE:
+        print("❌ Gemini — google-genai n'est pas installé")
+        print("   → pip install google-genai")
+        return None
+    
+    print("♊ Gemini Vision — Analyse en cours...")
     start_time = time.time()
     
     try:
-        from paddleocr import PaddleOCR
-        import logging
-        logging.getLogger("ppocr").setLevel(logging.ERROR)
-        ocr = PaddleOCR(use_textline_orientation=True, lang=p_lang)
-        results = ocr.ocr(image_path)
+        # Initialize the client
+        client = genai.Client(api_key=api_key)
+        
+        # Read and encode the image
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+        
+        # Detect MIME type
+        ext = Path(image_path).suffix.lower()
+        mime_map = {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png", ".bmp": "image/bmp",
+            ".webp": "image/webp", ".tiff": "image/tiff",
+            ".tif": "image/tiff",
+        }
+        mime_type = mime_map.get(ext, "image/png")
+        
+        # Create the image part
+        image_part = genai.types.Part.from_bytes(
+            data=image_bytes,
+            mime_type=mime_type,
+        )
+        
+        # Prompt optimized for handwritten text extraction
+        prompt = (
+            "You are an expert OCR system specialized in handwritten text recognition. "
+            "Extract ALL text visible in this image exactly as written. "
+            "Do not interpret, correct, or modify the text — transcribe it character by character. "
+            "If you can't read a word clearly, provide your best guess with [?] after it. "
+            "Return ONLY the extracted text, nothing else."
+        )
+        
+        # Call the API
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[prompt, image_part],
+        )
+        
+        extracted_text = response.text.strip() if response.text else ""
+        elapsed = time.time() - start_time
+        
+        print(f"   ✅ Terminé en {elapsed:.1f}s")
+        
+        return {
+            "text": extracted_text,
+            "engine": "gemini",
+            "model": "gemini-2.0-flash",
+            "elapsed_seconds": round(elapsed, 2),
+        }
+        
     except Exception as e:
-        print(f"PaddleOCR erreur: {e}")
+        elapsed = time.time() - start_time
+        print(f"   ❌ Erreur Gemini: {e}")
         return {
-            "text": f"Erreur PaddleOCR: {e}",
-            "words": [],
-            "avg_confidence": 0.0,
-            "min_confidence": 0.0,
-            "engine": "paddleocr",
-            "elapsed_seconds": 0.0,
+            "text": f"Erreur Gemini: {e}",
+            "engine": "gemini",
+            "model": "gemini-2.0-flash",
+            "elapsed_seconds": round(elapsed, 2),
+            "error": True,
         }
-        
-    elapsed = time.time() - start_time
-    
-    if not results or not results[0]:
-        return {
-            "text": "",
-            "words": [],
-            "avg_confidence": 0.0,
-            "min_confidence": 0.0,
-            "engine": "paddleocr",
-            "elapsed_seconds": elapsed,
-        }
-    
-    words = []
-    texts = []
-    confidences = []
-    
-    for line in results[0]:
-        bbox = line[0]
-        text = line[1][0]
-        confidence = float(line[1][1])
-        
-        words.append({
-            "text": text,
-            "confidence": round(confidence, 4),
-            "bbox": bbox
-        })
-        texts.append(text)
-        confidences.append(confidence)
-        
-    full_text = " ".join(texts)
-    avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
-    min_conf = min(confidences) if confidences else 0.0
-    
-    return {
-        "text": full_text,
-        "words": words,
-        "avg_confidence": round(avg_conf, 4),
-        "min_confidence": round(min_conf, 4),
-        "engine": "paddleocr",
-        "elapsed_seconds": round(elapsed, 2),
-    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. MOTEUR OCR — TrOCR via Hugging Face Inference API (optionnel)
+# 2.C. MOTEUR OCR — Mistral OCR (Mistral AI API)
+# ─────────────────────────────────────────────────────────────────────────────
+def ocr_mistral(image_path: str, api_key: str = None) -> dict:
+    """
+    Exécute Mistral OCR sur une image manuscrite.
+    
+    Utilise le modèle mistral-ocr-latest pour l'extraction de texte.
+    
+    Returns:
+        dict avec:
+        - text: texte extrait
+        - engine: "mistral"
+        - elapsed_seconds: temps d'exécution
+        - model: nom du modèle utilisé
+        - pages: nombre de pages traitées
+    """
+    api_key = api_key or os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        print("ℹ️  Mistral — Ignoré (MISTRAL_API_KEY non défini)")
+        return None
+    
+    if not MISTRAL_AVAILABLE:
+        print("❌ Mistral — mistralai n'est pas installé")
+        print("   → pip install mistralai")
+        return None
+    
+    print("🌀 Mistral OCR — Analyse en cours...")
+    start_time = time.time()
+    
+    try:
+        # Initialize the client
+        client = Mistral(api_key=api_key)
+        
+        # Read and encode the image as base64 data URI
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+        
+        ext = Path(image_path).suffix.lower()
+        mime_map = {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png", ".bmp": "image/bmp",
+            ".webp": "image/webp", ".tiff": "image/tiff",
+            ".tif": "image/tiff",
+        }
+        mime_type = mime_map.get(ext, "image/png")
+        
+        b64_data = base64.b64encode(image_bytes).decode("utf-8")
+        data_uri = f"data:{mime_type};base64,{b64_data}"
+        
+        # Call Mistral OCR API
+        ocr_response = client.ocr.process(
+            model="mistral-ocr-latest",
+            document={
+                "type": "image_url",
+                "image_url": data_uri,
+            },
+        )
+        
+        # Extract text from all pages
+        texts = []
+        if ocr_response and hasattr(ocr_response, 'pages'):
+            for page in ocr_response.pages:
+                if hasattr(page, 'markdown') and page.markdown:
+                    texts.append(page.markdown)
+                elif hasattr(page, 'text') and page.text:
+                    texts.append(page.text)
+        
+        full_text = "\n".join(texts).strip()
+        elapsed = time.time() - start_time
+        
+        page_count = len(ocr_response.pages) if hasattr(ocr_response, 'pages') else 0
+        
+        print(f"   ✅ Terminé en {elapsed:.1f}s — {page_count} page(s) traitée(s)")
+        
+        return {
+            "text": full_text,
+            "engine": "mistral",
+            "model": "mistral-ocr-latest",
+            "elapsed_seconds": round(elapsed, 2),
+            "pages": page_count,
+        }
+        
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"   ❌ Erreur Mistral: {e}")
+        return {
+            "text": f"Erreur Mistral: {e}",
+            "engine": "mistral",
+            "model": "mistral-ocr-latest",
+            "elapsed_seconds": round(elapsed, 2),
+            "error": True,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2.D. MOTEUR OCR — TrOCR via Hugging Face Inference API (optionnel)
 # ─────────────────────────────────────────────────────────────────────────────
 def ocr_trocr_api(image_path: str) -> dict | None:
     """
@@ -437,6 +563,170 @@ def ocr_trocr_api(image_path: str) -> dict | None:
     
     print(f"   ❌ Échec après {MAX_API_RETRIES} tentatives")
     return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. AI ANALYSIS — Analyse intelligente des résultats OCR
+# ─────────────────────────────────────────────────────────────────────────────
+def analyze_with_ai(
+    ocr_results: dict,
+    image_path: str = None,
+    api_key: str = None,
+) -> dict:
+    """
+    Utilise Gemini pour analyser les résultats OCR et fournir:
+    - La meilleure interprétation du texte
+    - Des corrections suggérées
+    - Un score de confiance global
+    - Un classement des moteurs
+    
+    Args:
+        ocr_results: dict avec les clés engine_name -> result_dict
+        image_path: chemin vers l'image originale (optionnel, pour re-analyse)
+        api_key: clé API Gemini
+    
+    Returns:
+        dict avec analysis, corrections, trust_score, engine_ranking
+    """
+    api_key = api_key or os.environ.get("GEMINI_API_KEY")
+    if not api_key or not GEMINI_AVAILABLE:
+        return {
+            "best_text": "",
+            "corrections": [],
+            "trust_score": 0.0,
+            "engine_ranking": [],
+            "interpretation": "AI analysis unavailable — Gemini API key required.",
+            "error": True,
+        }
+    
+    print("🤖 AI Analysis — Analyse intelligente en cours...")
+    start_time = time.time()
+    
+    try:
+        client = genai.Client(api_key=api_key)
+        
+        # Build the analysis prompt with all OCR results
+        engines_text = ""
+        for engine_name, result in ocr_results.items():
+            if result and isinstance(result, dict) and result.get("text"):
+                text = result["text"]
+                conf = result.get("avg_confidence", "N/A")
+                engines_text += f"\n### {engine_name}\n"
+                engines_text += f"Text: \"{text}\"\n"
+                if conf != "N/A":
+                    engines_text += f"Average Confidence: {conf}\n"
+        
+        if not engines_text.strip():
+            return {
+                "best_text": "",
+                "corrections": [],
+                "trust_score": 0.0,
+                "engine_ranking": [],
+                "interpretation": "No OCR results to analyze.",
+                "error": True,
+            }
+        
+        prompt = f"""You are an expert handwriting analyst and OCR quality assessor.
+
+Multiple OCR engines have extracted text from the same handwritten image. 
+Analyze their outputs and provide your expert assessment.
+
+## OCR Results:
+{engines_text}
+
+## Your Task:
+Respond in this exact JSON format (no markdown fencing, just raw JSON):
+{{
+    "best_text": "The most accurate version of the handwritten text, combining the best parts of all engines",
+    "corrections": ["List of specific corrections you made and why"],
+    "trust_score": 0.85,
+    "engine_ranking": [
+        {{"engine": "engine_name", "score": 0.9, "reason": "Why this engine performed well/poorly"}},
+    ],
+    "interpretation": "What the handwritten text likely means or says, with context about quality and readability"
+}}
+
+Important:
+- trust_score is 0.0 (completely unreadable) to 1.0 (perfectly clear)
+- Be honest — if the text is unclear, say so
+- Rank ALL engines that provided results
+- corrections should be specific, e.g. "Changed 'teh' to 'the' — common OCR transposition"
+"""
+        
+        # Optionally include the image for re-analysis
+        contents = [prompt]
+        if image_path and os.path.isfile(image_path):
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
+            ext = Path(image_path).suffix.lower()
+            mime_map = {
+                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".png": "image/png", ".bmp": "image/bmp",
+                ".webp": "image/webp",
+            }
+            mime_type = mime_map.get(ext, "image/png")
+            image_part = genai.types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+            contents = [prompt, image_part]
+        
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=contents,
+        )
+        
+        elapsed = time.time() - start_time
+        raw_text = response.text.strip() if response.text else "{}"
+        
+        # Parse the JSON response
+        # Strip markdown code fencing if present
+        if raw_text.startswith("```"):
+            lines = raw_text.split("\n")
+            # Remove first and last lines (```json and ```)
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            raw_text = "\n".join(lines)
+        
+        try:
+            analysis = json.loads(raw_text)
+        except json.JSONDecodeError:
+            # Try to extract JSON from the response
+            json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+            if json_match:
+                try:
+                    analysis = json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    analysis = {
+                        "best_text": raw_text,
+                        "corrections": [],
+                        "trust_score": 0.5,
+                        "engine_ranking": [],
+                        "interpretation": raw_text,
+                    }
+            else:
+                analysis = {
+                    "best_text": raw_text,
+                    "corrections": [],
+                    "trust_score": 0.5,
+                    "engine_ranking": [],
+                    "interpretation": raw_text,
+                }
+        
+        analysis["elapsed_seconds"] = round(elapsed, 2)
+        analysis["error"] = False
+        
+        print(f"   ✅ Analyse terminée en {elapsed:.1f}s")
+        return analysis
+        
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"   ❌ Erreur AI Analysis: {e}")
+        return {
+            "best_text": "",
+            "corrections": [],
+            "trust_score": 0.0,
+            "engine_ranking": [],
+            "interpretation": f"AI analysis failed: {e}",
+            "elapsed_seconds": round(elapsed, 2),
+            "error": True,
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -612,7 +902,6 @@ def _manual_error_rates(hypothesis: str, reference: str) -> dict:
     wer_val = word_dist / max(len(reference), 1)
     
     # Meilleure approche WER : Levenshtein sur les listes de mots
-    # (mais nécessite un alignement par mots, on simplifie ici)
     word_lev = 0
     max_len = max(len(hyp_words), len(ref_words))
     for i in range(max_len):
@@ -665,8 +954,61 @@ def compute_cross_engine_agreement(text1: str, text2: str) -> dict:
     }
 
 
+def compute_multi_engine_agreement(results: dict) -> dict:
+    """
+    Compare tous les moteurs OCR entre eux pour créer une matrice d'accord.
+    
+    Args:
+        results: dict engine_name -> result_dict
+    
+    Returns:
+        dict avec matrix, avg_agreement, best_pair
+    """
+    texts = {}
+    for name, r in results.items():
+        if r and isinstance(r, dict) and r.get("text") and not r.get("error"):
+            texts[name] = r["text"]
+    
+    if len(texts) < 2:
+        return {"matrix": {}, "avg_agreement": 0.0, "best_pair": None}
+    
+    # Build pairwise similarity matrix
+    matrix = {}
+    all_scores = []
+    best_score = 0.0
+    best_pair = None
+    
+    engines = list(texts.keys())
+    for i, e1 in enumerate(engines):
+        matrix[e1] = {}
+        for j, e2 in enumerate(engines):
+            if i == j:
+                matrix[e1][e2] = 1.0
+            elif j > i:
+                sim = difflib.SequenceMatcher(
+                    None, texts[e1].lower().strip(), texts[e2].lower().strip()
+                ).ratio()
+                sim = round(sim, 4)
+                matrix[e1][e2] = sim
+                if e2 not in matrix:
+                    matrix[e2] = {}
+                matrix[e2][e1] = sim
+                all_scores.append(sim)
+                if sim > best_score:
+                    best_score = sim
+                    best_pair = (e1, e2, sim)
+    
+    avg = sum(all_scores) / len(all_scores) if all_scores else 0.0
+    
+    return {
+        "matrix": matrix,
+        "avg_agreement": round(avg, 4),
+        "best_pair": best_pair,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. AFFICHAGE — Dashboard de résultats
+# 6. AFFICHAGE — Dashboard de résultats (CLI)
 # ─────────────────────────────────────────────────────────────────────────────
 def _safe_print(text: str):
     """Print avec fallback ASCII si l'encodage ne supporte pas Unicode."""
@@ -818,6 +1160,8 @@ Exemples:
 
 Variables d'environnement:
   HF_API_TOKEN    Token Hugging Face (optionnel, active TrOCR)
+  GEMINI_API_KEY  Clé API Google Gemini (active Gemini Vision OCR)
+  MISTRAL_API_KEY Clé API Mistral (active Mistral OCR)
         """,
     )
     
@@ -883,13 +1227,14 @@ def main():
     print(f"  📐 Taille   : {os.path.getsize(image_path) / 1024:.1f} Ko")
     print(f"  🌐 Langues  : {', '.join(args.lang)}")
     print(f"  🔑 HF Token : {'✅ Défini' if os.environ.get('HF_API_TOKEN') else '❌ Non défini'}")
+    print(f"  ♊ Gemini   : {'✅ Défini' if os.environ.get('GEMINI_API_KEY') else '❌ Non défini'}")
+    print(f"  🌀 Mistral  : {'✅ Défini' if os.environ.get('MISTRAL_API_KEY') else '❌ Non défini'}")
     
     # ── 1. Prétraitement ──
     if not args.no_preprocess:
         print_section("Prétraitement")
         try:
             preprocessed = preprocess_image(image_path)
-            # Sauvegarder temporairement l'image prétraitée pour EasyOCR
             temp_path = str(Path(image_path).parent / f"_preprocessed_{Path(image_path).name}")
             cv2.imwrite(temp_path, preprocessed)
             ocr_image_path = temp_path
@@ -910,7 +1255,7 @@ def main():
     # ── 3. TrOCR (optionnel) ──
     trocr_result = None
     if not args.no_trocr:
-        trocr_result = ocr_trocr_api(image_path)  # Utiliser l'image originale
+        trocr_result = ocr_trocr_api(image_path)
     
     # ── Nettoyage du fichier temporaire ──
     if temp_path and os.path.exists(temp_path):

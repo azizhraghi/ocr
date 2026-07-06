@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 =============================================================================
-  OCR Manuscrit — Dashboard Streamlit
+  OCR Manuscrit — Dashboard Streamlit v2.0
 =============================================================================
 
-Dashboard interactif pour tester l'OCR manuscrit avec visualisation
-des métriques, validation NLP, et comparaison de moteurs.
+Dashboard interactif pour tester l'OCR manuscrit avec:
+- Triple moteur: EasyOCR + Gemini Vision + Mistral OCR
+- AI Analysis: Gemini-powered intelligent feedback
+- n8n Webhook integration for automation
+- Engine competition leaderboard
 
 Usage:
     streamlit run app.py
@@ -27,19 +30,22 @@ from PIL import Image
 from ocr import (
     preprocess_image,
     ocr_easyocr,
-    ocr_paddleocr,
+    ocr_gemini,
+    ocr_mistral,
     ocr_trocr_api,
     validate_nlp,
     compute_readability_grade,
     compute_error_rates,
     compute_cross_engine_agreement,
+    compute_multi_engine_agreement,
+    analyze_with_ai,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration Streamlit
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="OCR Manuscrit",
+    page_title="OCR Manuscrit — AI Pipeline",
     page_icon="🖊️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -70,6 +76,8 @@ st.markdown("""
         --warning: #FFB84D;
         --danger: #FF5C5C;
         --info: #5BA4FF;
+        --gemini: #4285F4;
+        --mistral: #FF7000;
     }
 
     /* ── Corps principal ── */
@@ -234,6 +242,64 @@ st.markdown("""
         letter-spacing: 0.05em;
     }
 
+    /* ── AI Analysis card ── */
+    .ai-analysis-card {
+        background: linear-gradient(135deg, #1a1d29 0%, #1e2235 100%);
+        border: 1px solid rgba(108, 99, 255, 0.3);
+        border-radius: 16px;
+        padding: 28px;
+        margin: 16px 0;
+        position: relative;
+        overflow: hidden;
+    }
+    .ai-analysis-card::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; right: 0;
+        height: 3px;
+        background: linear-gradient(90deg, #6C63FF, #FF6B9D, #00D4AA);
+    }
+
+    /* ── Leaderboard ── */
+    .leaderboard-item {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px 20px;
+        margin: 8px 0;
+        transition: all 0.3s ease;
+    }
+    .leaderboard-item:hover {
+        border-color: var(--primary);
+        transform: translateX(4px);
+    }
+    .leaderboard-rank {
+        font-size: 1.8rem;
+        font-weight: 800;
+        font-family: 'JetBrains Mono', monospace;
+        min-width: 50px;
+        text-align: center;
+    }
+    .leaderboard-engine {
+        font-weight: 700;
+        font-size: 1.05rem;
+        color: var(--text-primary);
+    }
+    .leaderboard-score {
+        font-family: 'JetBrains Mono', monospace;
+        font-weight: 700;
+        font-size: 1.2rem;
+        margin-left: auto;
+    }
+    .leaderboard-reason {
+        font-size: 0.85rem;
+        color: var(--text-secondary);
+        margin-top: 4px;
+    }
+
     /* ── Smooth animations ── */
     @keyframes fadeInUp {
         from { opacity: 0; transform: translateY(20px); }
@@ -289,6 +355,33 @@ def save_uploaded_to_temp(uploaded_file) -> str:
         return tmp.name
 
 
+def render_leaderboard(engine_ranking: list):
+    """Render the engine competition leaderboard."""
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    colors = ["#FFD700", "#C0C0C0", "#CD7F32", "#A0A4B8", "#A0A4B8"]
+
+    html = ""
+    for i, entry in enumerate(engine_ranking):
+        medal = medals[i] if i < len(medals) else f"{i+1}."
+        color = colors[i] if i < len(colors) else "#A0A4B8"
+        engine = entry.get("engine", "?")
+        score = entry.get("score", 0)
+        reason = entry.get("reason", "")
+        score_pct = f"{score * 100:.0f}%"
+        
+        html += f"""
+        <div class="leaderboard-item">
+            <div class="leaderboard-rank" style="color: {color};">{medal}</div>
+            <div>
+                <div class="leaderboard-engine">{engine}</div>
+                <div class="leaderboard-reason">{reason}</div>
+            </div>
+            <div class="leaderboard-score" style="color: {get_confidence_color(score)};">{score_pct}</div>
+        </div>
+        """
+    return html
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
@@ -307,18 +400,47 @@ with st.sidebar:
         languages = ["en"]
 
     st.markdown("---")
+    st.markdown("### 🔧 Options")
 
     # Prétraitement
     enable_preprocess = st.toggle("🔧 Prétraitement d'image", value=True,
                                    help="Améliore le contraste et réduit le bruit")
 
-    # PaddleOCR
-    enable_paddleocr = st.toggle("🚀 PaddleOCR (Local)", value=True,
-                                  help="Moteur local haute performance")
+    st.markdown("---")
+    st.markdown("### 🏆 Moteurs OCR")
+
+    # Gemini
+    enable_gemini = st.toggle("♊ Gemini Vision OCR", value=True,
+                               help="Google Gemini AI — extraction haute qualité")
+
+    # Mistral
+    enable_mistral = st.toggle("🌀 Mistral OCR", value=True,
+                                help="Mistral AI — OCR spécialisé documents")
 
     # TrOCR
     enable_trocr = st.toggle("🌐 TrOCR (HF API)", value=False,
                               help="Nécessite HF_API_TOKEN")
+
+    # AI Analysis
+    st.markdown("---")
+    st.markdown("### 🤖 Intelligence")
+    enable_ai_analysis = st.toggle("🤖 AI Analysis", value=True,
+                                    help="Analyse intelligente par Gemini des résultats OCR")
+
+    st.markdown("---")
+    st.markdown("### 🔑 Clés API")
+
+    gemini_key = st.text_input("♊ Gemini API Key", type="password",
+                                value=os.environ.get("GEMINI_API_KEY", ""),
+                                help="Clé API Google Gemini")
+    if gemini_key:
+        os.environ["GEMINI_API_KEY"] = gemini_key
+
+    mistral_key = st.text_input("🌀 Mistral API Key", type="password",
+                                 value=os.environ.get("MISTRAL_API_KEY", ""),
+                                 help="Clé API Mistral AI")
+    if mistral_key:
+        os.environ["MISTRAL_API_KEY"] = mistral_key
 
     if enable_trocr:
         hf_token = st.text_input("🔑 HF API Token", type="password",
@@ -326,6 +448,17 @@ with st.sidebar:
                                   help="Token Hugging Face pour l'API d'inférence")
         if hf_token:
             os.environ["HF_API_TOKEN"] = hf_token
+
+    st.markdown("---")
+
+    # n8n webhook
+    st.markdown("### 🔗 Automation")
+    n8n_webhook_url = st.text_input(
+        "n8n Webhook URL",
+        value="",
+        placeholder="https://your-n8n.app/webhook/...",
+        help="URL du webhook n8n pour l'automatisation OCR"
+    )
 
     st.markdown("---")
 
@@ -340,8 +473,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: #666; font-size: 0.75rem;'>"
-        "OCR Manuscrit v1.0<br>"
-        "EasyOCR + TrOCR + NLP"
+        "OCR Manuscrit v2.0<br>"
+        "EasyOCR + Gemini + Mistral + AI"
         "</div>",
         unsafe_allow_html=True
     )
@@ -356,7 +489,7 @@ st.markdown("""
         🖊️ OCR Manuscrit
     </h1>
     <p style="color: #A0A4B8; font-size: 1.1rem; margin-top: 4px;">
-        Extraction de texte manuscrit avec validation NLP et métriques de qualité
+        Extraction de texte manuscrit avec triple moteur OCR, analyse IA et métriques de qualité
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -384,9 +517,19 @@ if uploaded_file is not None:
         st.markdown(f"**Dimensions:** {image.size[0]} × {image.size[1]} px")
         st.markdown(f"**Mode:** {image.mode}")
         st.markdown(f"**Langues:** {', '.join(languages)}")
-        st.markdown(f"**Prétraitement:** {'✅' if enable_preprocess else '❌'}")
-        st.markdown(f"**PaddleOCR:** {'✅' if enable_paddleocr else '❌'}")
-        st.markdown(f"**TrOCR:** {'✅' if enable_trocr else '❌'}")
+
+        engines_status = []
+        engines_status.append("✅ EasyOCR (toujours actif)")
+        if enable_gemini:
+            engines_status.append("✅ Gemini Vision" if gemini_key else "⚠️ Gemini (clé manquante)")
+        if enable_mistral:
+            engines_status.append("✅ Mistral OCR" if mistral_key else "⚠️ Mistral (clé manquante)")
+        if enable_trocr:
+            engines_status.append("✅ TrOCR")
+
+        st.markdown("**Moteurs actifs:**")
+        for s in engines_status:
+            st.markdown(f"  {s}")
 
     st.markdown("---")
 
@@ -398,6 +541,7 @@ if uploaded_file is not None:
 
         try:
             # ── 1. Prétraitement ──
+            prep_path = None
             if enable_preprocess:
                 with st.spinner("🔧 Prétraitement de l'image..."):
                     try:
@@ -421,66 +565,100 @@ if uploaded_file is not None:
                         prep_path = None
             else:
                 ocr_path = temp_path
-                prep_path = None
 
             # ── 2. EasyOCR ──
             with st.spinner("🔍 EasyOCR — Analyse en cours..."):
                 easyocr_result = ocr_easyocr(ocr_path, languages=languages)
 
-            # ── 3. PaddleOCR (optionnel) ──
-            paddleocr_result = None
-            if enable_paddleocr:
-                with st.spinner("🚀 PaddleOCR — Analyse en cours..."):
-                    paddleocr_result = ocr_paddleocr(temp_path, languages=languages)
+            # ── 3. Gemini Vision OCR ──
+            gemini_result = None
+            if enable_gemini and gemini_key:
+                with st.spinner("♊ Gemini Vision — Analyse en cours..."):
+                    gemini_result = ocr_gemini(temp_path, api_key=gemini_key)
 
-            # ── 4. TrOCR (optionnel) ──
+            # ── 4. Mistral OCR ──
+            mistral_result = None
+            if enable_mistral and mistral_key:
+                with st.spinner("🌀 Mistral OCR — Analyse en cours..."):
+                    mistral_result = ocr_mistral(temp_path, api_key=mistral_key)
+
+            # ── 5. TrOCR (optionnel) ──
             trocr_result = None
             if enable_trocr:
                 with st.spinner("🌐 TrOCR (HF API) — Envoi en cours..."):
                     trocr_result = ocr_trocr_api(temp_path)
 
-            # ── 5. NLP Validation ──
+            # ── 6. n8n Webhook (optionnel) ──
+            n8n_result = None
+            if n8n_webhook_url:
+                with st.spinner("🔗 n8n Webhook — Envoi en cours..."):
+                    try:
+                        import requests
+                        with open(temp_path, "rb") as f:
+                            files = {"image": (uploaded_file.name, f, "image/png")}
+                            resp = requests.post(n8n_webhook_url, files=files, timeout=60)
+                        if resp.status_code == 200:
+                            n8n_result = resp.json()
+                        else:
+                            st.warning(f"⚠️ n8n webhook returned {resp.status_code}")
+                    except Exception as e:
+                        st.warning(f"⚠️ n8n webhook failed: {e}")
+
+            # ── 7. NLP Validation ──
             primary_text = easyocr_result["text"]
             nlp_result = validate_nlp(primary_text)
 
-            # ── 6. Grade ──
+            # ── 8. Grade ──
             grade_letter, grade_desc = compute_readability_grade(
                 easyocr_result["avg_confidence"],
                 nlp_result["dictionary_hit_rate"],
             )
 
-            # ── 7. Error rates ──
+            # ── 9. Error rates ──
             error_rates = None
             if ground_truth.strip():
                 error_rates = compute_error_rates(primary_text, ground_truth.strip())
 
-            # ── 8. Cross-engine agreement ──
-            cross_agreement = None
-            if paddleocr_result and paddleocr_result.get("text"):
-                cross_agreement = compute_cross_engine_agreement(
-                    easyocr_result["text"], paddleocr_result["text"]
-                )
-            elif trocr_result and trocr_result.get("text"):
-                cross_agreement = compute_cross_engine_agreement(
-                    easyocr_result["text"], trocr_result["text"]
-                )
+            # ── 10. Multi-engine agreement ──
+            all_results = {"EasyOCR": easyocr_result}
+            if gemini_result and not gemini_result.get("error"):
+                all_results["Gemini"] = gemini_result
+            if mistral_result and not mistral_result.get("error"):
+                all_results["Mistral"] = mistral_result
+            if trocr_result:
+                all_results["TrOCR"] = trocr_result
+
+            multi_agreement = compute_multi_engine_agreement(all_results)
+
+            # ── 11. AI Analysis ──
+            ai_analysis = None
+            if enable_ai_analysis and gemini_key:
+                with st.spinner("🤖 AI Analysis — Analyse intelligente en cours..."):
+                    ai_analysis = analyze_with_ai(
+                        all_results,
+                        image_path=temp_path,
+                        api_key=gemini_key,
+                    )
 
             # Store in session state
             st.session_state["results"] = {
                 "easyocr": easyocr_result,
-                "paddleocr": paddleocr_result,
+                "gemini": gemini_result,
+                "mistral": mistral_result,
                 "trocr": trocr_result,
+                "n8n": n8n_result,
                 "nlp": nlp_result,
                 "grade": (grade_letter, grade_desc),
                 "error_rates": error_rates,
-                "cross_agreement": cross_agreement,
+                "multi_agreement": multi_agreement,
+                "ai_analysis": ai_analysis,
             }
 
         finally:
             # Nettoyage
             try:
                 os.unlink(temp_path)
-                if enable_preprocess and prep_path and os.path.exists(prep_path):
+                if prep_path and os.path.exists(prep_path):
                     os.unlink(prep_path)
             except OSError:
                 pass
@@ -489,18 +667,70 @@ if uploaded_file is not None:
     if "results" in st.session_state:
         results = st.session_state["results"]
         easyocr_result = results["easyocr"]
-        paddleocr_result = results.get("paddleocr")
-        trocr_result = results["trocr"]
+        gemini_result = results.get("gemini")
+        mistral_result = results.get("mistral")
+        trocr_result = results.get("trocr")
+        n8n_result = results.get("n8n")
         nlp_result = results["nlp"]
         grade_letter, grade_desc = results["grade"]
         error_rates = results["error_rates"]
-        cross_agreement = results["cross_agreement"]
+        multi_agreement = results.get("multi_agreement", {})
+        ai_analysis = results.get("ai_analysis")
 
         # ════════════════════════════════════════════════════════════
-        # SECTION 1: Texte extrait
+        # SECTION 0: AI Analysis (featured at the top)
+        # ════════════════════════════════════════════════════════════
+        if ai_analysis and not ai_analysis.get("error"):
+            st.markdown("""
+            <div class="section-header">🤖 AI Analysis — Interprétation Intelligente</div>
+            """, unsafe_allow_html=True)
+
+            # Best text
+            best_text = ai_analysis.get("best_text", "")
+            trust_score = ai_analysis.get("trust_score", 0.0)
+            interpretation = ai_analysis.get("interpretation", "")
+
+            trust_color = get_confidence_color(trust_score)
+
+            st.markdown(f"""
+            <div class="ai-analysis-card">
+                <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
+                    <span style="font-size: 1.5rem;">🤖</span>
+                    <span style="font-weight: 700; font-size: 1.1rem; color: var(--text-primary);">Texte le plus probable</span>
+                    <span style="margin-left: auto; font-family: 'JetBrains Mono'; font-weight: 700; font-size: 1.3rem; color: {trust_color};">
+                        {trust_score * 100:.0f}% confiance
+                    </span>
+                </div>
+                <div style="background: rgba(108,99,255,0.08); border-radius: 12px; padding: 16px 20px; font-size: 1.2rem; line-height: 1.6; color: var(--text-primary); border: 1px solid rgba(108,99,255,0.2);">
+                    "{best_text}"
+                </div>
+                <p style="margin-top: 16px; color: var(--text-secondary); font-size: 0.95rem; line-height: 1.6;">
+                    {interpretation}
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # Corrections
+            corrections = ai_analysis.get("corrections", [])
+            if corrections:
+                with st.expander("✏️ Corrections suggérées par l'IA", expanded=True):
+                    for c in corrections:
+                        st.markdown(f"• {c}")
+
+            # Engine Leaderboard
+            engine_ranking = ai_analysis.get("engine_ranking", [])
+            if engine_ranking:
+                st.markdown("""
+                <div class="section-header">🏆 Classement des moteurs — Competition</div>
+                """, unsafe_allow_html=True)
+
+                st.markdown(render_leaderboard(engine_ranking), unsafe_allow_html=True)
+
+        # ════════════════════════════════════════════════════════════
+        # SECTION 1: Texte extrait par moteur
         # ════════════════════════════════════════════════════════════
         st.markdown("""
-        <div class="section-header">📝 Texte extrait</div>
+        <div class="section-header">📝 Texte extrait par moteur</div>
         """, unsafe_allow_html=True)
 
         if easyocr_result["text"]:
@@ -513,14 +743,26 @@ if uploaded_file is not None:
         else:
             st.warning("Aucun texte détecté par EasyOCR")
 
-        if paddleocr_result and paddleocr_result.get("text"):
+        if gemini_result and gemini_result.get("text") and not gemini_result.get("error"):
             st.markdown(f"""
-            <div class="extracted-text" style="border-left-color: #FF6B9D; margin-top: 12px;">
-                <span class="engine-tag" style="background: rgba(255,107,157,0.12); color: #FF6B9D; border-color: rgba(255,107,157,0.25);">🚀 PaddleOCR</span>
-                <p style="margin-top: 12px; margin-bottom: 0;">{paddleocr_result['text']}</p>
+            <div class="extracted-text" style="border-left-color: #4285F4; margin-top: 12px;">
+                <span class="engine-tag" style="background: rgba(66,133,244,0.12); color: #4285F4; border-color: rgba(66,133,244,0.25);">♊ Gemini Vision</span>
+                <p style="margin-top: 12px; margin-bottom: 0;">{gemini_result['text']}</p>
             </div>
             """, unsafe_allow_html=True)
-            
+        elif gemini_result and gemini_result.get("error"):
+            st.error(f"Gemini: {gemini_result.get('text', 'Erreur')}")
+
+        if mistral_result and mistral_result.get("text") and not mistral_result.get("error"):
+            st.markdown(f"""
+            <div class="extracted-text" style="border-left-color: #FF7000; margin-top: 12px;">
+                <span class="engine-tag" style="background: rgba(255,112,0,0.12); color: #FF7000; border-color: rgba(255,112,0,0.25);">🌀 Mistral OCR</span>
+                <p style="margin-top: 12px; margin-bottom: 0;">{mistral_result['text']}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        elif mistral_result and mistral_result.get("error"):
+            st.error(f"Mistral: {mistral_result.get('text', 'Erreur')}")
+
         if trocr_result and trocr_result.get("text"):
             st.markdown(f"""
             <div class="extracted-text" style="border-left-color: #00D4AA; margin-top: 12px;">
@@ -528,8 +770,14 @@ if uploaded_file is not None:
                 <p style="margin-top: 12px; margin-bottom: 0;">{trocr_result['text']}</p>
             </div>
             """, unsafe_allow_html=True)
-        elif enable_trocr and not trocr_result:
-            st.info("ℹ️ TrOCR n'a pas pu se connecter. Vérifiez votre token HF.")
+
+        if n8n_result:
+            st.markdown(f"""
+            <div class="extracted-text" style="border-left-color: #FF6D5A; margin-top: 12px;">
+                <span class="engine-tag" style="background: rgba(255,109,90,0.12); color: #FF6D5A; border-color: rgba(255,109,90,0.25);">🔗 n8n Workflow</span>
+                <p style="margin-top: 12px; margin-bottom: 0;">{n8n_result}</p>
+            </div>
+            """, unsafe_allow_html=True)
 
         # ════════════════════════════════════════════════════════════
         # SECTION 2: Métriques de qualité
@@ -552,67 +800,90 @@ if uploaded_file is not None:
             conf_color = get_confidence_color(easyocr_result["avg_confidence"])
             st.markdown(render_metric_card(
                 "🎯", f"{easyocr_result['avg_confidence']:.0%}",
-                "Confiance moyenne", conf_color
+                "Confiance EasyOCR", conf_color
             ), unsafe_allow_html=True)
 
         with col_m2:
-            min_color = get_confidence_color(easyocr_result["min_confidence"])
-            st.markdown(render_metric_card(
-                "📉", f"{easyocr_result['min_confidence']:.0%}",
-                "Confiance min", min_color
-            ), unsafe_allow_html=True)
-
-        with col_m3:
             dict_color = get_confidence_color(nlp_result["dictionary_hit_rate"])
             st.markdown(render_metric_card(
                 "📖", f"{nlp_result['dictionary_hit_rate']:.0%}",
                 "Taux dictionnaire", dict_color
             ), unsafe_allow_html=True)
 
-        with col_m4:
+        with col_m3:
             st.markdown(render_metric_card(
                 "🔢", str(nlp_result["word_count"]),
                 "Mots détectés", "#8B83FF"
             ), unsafe_allow_html=True)
 
-        # ── Ligne 2: Temps + CER/WER ──
-        extra_cols = []
-        if error_rates:
-            extra_cols.append(("CER", error_rates["cer_percent"], "Character Error Rate"))
-            extra_cols.append(("WER", error_rates["wer_percent"], "Word Error Rate"))
-        if cross_agreement:
-            extra_cols.append(("🤝", cross_agreement["similarity_percent"], "Concordance moteurs"))
+        with col_m4:
+            # AI trust score if available
+            if ai_analysis and not ai_analysis.get("error"):
+                trust = ai_analysis.get("trust_score", 0)
+                trust_col = get_confidence_color(trust)
+                st.markdown(render_metric_card(
+                    "🤖", f"{trust * 100:.0f}%",
+                    "Trust Score (AI)", trust_col
+                ), unsafe_allow_html=True)
+            else:
+                min_color = get_confidence_color(easyocr_result["min_confidence"])
+                st.markdown(render_metric_card(
+                    "📉", f"{easyocr_result['min_confidence']:.0%}",
+                    "Confiance min", min_color
+                ), unsafe_allow_html=True)
 
-        extra_cols.append(("⏱️", f"{easyocr_result['elapsed_seconds']}s", "Temps EasyOCR"))
+        # ── Ligne 2: Temps par moteur ──
+        time_cols_data = [("🔍", f"{easyocr_result['elapsed_seconds']}s", "Temps EasyOCR")]
 
-        if paddleocr_result:
-            extra_cols.append(("🚀", f"{paddleocr_result['elapsed_seconds']}s", "Temps PaddleOCR"))
-
+        if gemini_result and not gemini_result.get("error"):
+            time_cols_data.append(("♊", f"{gemini_result['elapsed_seconds']}s", "Temps Gemini"))
+        if mistral_result and not mistral_result.get("error"):
+            time_cols_data.append(("🌀", f"{mistral_result['elapsed_seconds']}s", "Temps Mistral"))
         if trocr_result:
-            extra_cols.append(("🌐", f"{trocr_result['elapsed_seconds']}s", "Temps TrOCR"))
+            time_cols_data.append(("🌐", f"{trocr_result['elapsed_seconds']}s", "Temps TrOCR"))
+        if error_rates:
+            time_cols_data.append(("CER", error_rates["cer_percent"], "Character Error Rate"))
+            time_cols_data.append(("WER", error_rates["wer_percent"], "Word Error Rate"))
+        if multi_agreement.get("avg_agreement"):
+            time_cols_data.append(("🤝", f"{multi_agreement['avg_agreement'] * 100:.0f}%", "Concordance moyenne"))
 
-        if extra_cols:
-            cols = st.columns(len(extra_cols))
-            for i, (icon, val, label) in enumerate(extra_cols):
+        if time_cols_data:
+            cols = st.columns(len(time_cols_data))
+            for i, (icon, val, label) in enumerate(time_cols_data):
                 with cols[i]:
                     st.markdown(render_metric_card(icon, val, label), unsafe_allow_html=True)
 
         # ════════════════════════════════════════════════════════════
         # SECTION 3: Concordance inter-moteurs
         # ════════════════════════════════════════════════════════════
-        if cross_agreement:
+        if multi_agreement.get("matrix"):
             st.markdown("""
             <div class="section-header">🤝 Concordance inter-moteurs</div>
             """, unsafe_allow_html=True)
 
-            sim = cross_agreement["similarity"]
-            bar_color = get_confidence_color(sim)
+            if multi_agreement.get("best_pair"):
+                e1, e2, sim = multi_agreement["best_pair"]
+                if sim >= 0.9:
+                    status = "✅ Forte concordance"
+                elif sim >= 0.7:
+                    status = "⚠️ Concordance partielle"
+                else:
+                    status = "🟡 Faible concordance"
+                st.markdown(f"**Meilleure paire:** {e1} ↔ {e2} — **{sim * 100:.0f}%** {status}")
 
-            col_bar, col_status = st.columns([2, 1])
-            with col_bar:
-                st.progress(sim, text=f"Similarité: {cross_agreement['similarity_percent']}")
-            with col_status:
-                st.markdown(cross_agreement["status"])
+            # Show matrix as table
+            import pandas as pd
+            matrix = multi_agreement["matrix"]
+            engines = list(matrix.keys())
+            df_data = {}
+            for e1 in engines:
+                row = {}
+                for e2 in engines:
+                    val = matrix.get(e1, {}).get(e2, 0)
+                    row[e2] = f"{val * 100:.0f}%"
+                df_data[e1] = row
+            df = pd.DataFrame(df_data).T
+            st.dataframe(df, use_container_width=True)
 
         # ════════════════════════════════════════════════════════════
         # SECTION 4: Validation NLP
@@ -713,20 +984,20 @@ else:
         </h3>
         <div style="display: flex; justify-content: center; gap: 40px; flex-wrap: wrap;">
             <div style="text-align: center;">
-                <div style="font-size: 2rem;">🔍</div>
-                <p style="color: #666; font-size: 0.9rem;">Double moteur OCR<br><small>EasyOCR + TrOCR</small></p>
+                <div style="font-size: 2rem;">🏆</div>
+                <p style="color: #666; font-size: 0.9rem;">Triple moteur OCR<br><small>EasyOCR + Gemini + Mistral</small></p>
+            </div>
+            <div style="text-align: center;">
+                <div style="font-size: 2rem;">🤖</div>
+                <p style="color: #666; font-size: 0.9rem;">AI Analysis<br><small>Gemini intelligent feedback</small></p>
             </div>
             <div style="text-align: center;">
                 <div style="font-size: 2rem;">📊</div>
                 <p style="color: #666; font-size: 0.9rem;">Métriques de qualité<br><small>Confiance, CER, WER</small></p>
             </div>
             <div style="text-align: center;">
-                <div style="font-size: 2rem;">🔤</div>
-                <p style="color: #666; font-size: 0.9rem;">Validation NLP<br><small>Dictionnaire, corrections</small></p>
-            </div>
-            <div style="text-align: center;">
-                <div style="font-size: 2rem;">🤝</div>
-                <p style="color: #666; font-size: 0.9rem;">Cross-validation<br><small>Concordance moteurs</small></p>
+                <div style="font-size: 2rem;">🔗</div>
+                <p style="color: #666; font-size: 0.9rem;">Automation<br><small>n8n Webhook</small></p>
             </div>
         </div>
     </div>

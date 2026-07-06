@@ -1,0 +1,173 @@
+{
+  "name": "OCR AI Pipeline (Gemini + Mistral)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ocr",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "ocr-webhook-id"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.mistral.ai/v1/ocr",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "mistral-ocr-latest"
+            },
+            {
+              "name": "document",
+              "value": "={{ {\"type\": \"image_url\", \"image_url\": \"data:image/png;base64,\" + $binary.image.data} }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "mistral-ocr",
+      "name": "Mistral OCR",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        500,
+        150
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "mistral-auth-placeholder",
+          "name": "Mistral API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "contents",
+              "value": "={{ [{\"parts\":[{\"text\":\"Extract all handwritten text exactly as written.\"},{\"inline_data\":{\"mime_type\":\"image/png\",\"data\":$binary.image.data}}]}] }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "gemini-ocr",
+      "name": "Gemini Vision OCR",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        500,
+        450
+      ],
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "gemini-auth-placeholder",
+          "name": "Gemini API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "multiplex"
+      },
+      "id": "merge-results",
+      "name": "Merge Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [
+        750,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "options": {},
+        "responseCode": 200,
+        "respondWith": "json",
+        "responseBody": "={{ {\n  \"mistral_result\": $json[\"mistral_ocr\"],\n  \"gemini_result\": $json[\"gemini_ocr\"]\n} }}"
+      },
+      "id": "respond-to-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Mistral OCR",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Gemini Vision OCR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral OCR": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Vision OCR": {
+      "main": [
+        [
+          {
+            "node": "Merge Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Results": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

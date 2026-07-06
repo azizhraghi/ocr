@@ -5,3 +5,5 @@ opencv-python-headless
 jiwer
 streamlit
 pandas
+google-genai
+mistralai
