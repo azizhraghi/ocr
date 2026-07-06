@@ -1,0 +1,7 @@
+easyocr
+requests
+Pillow
+opencv-python-headless
+jiwer
+streamlit
+pandas
