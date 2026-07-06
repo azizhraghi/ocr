@@ -117,7 +117,10 @@ except ImportError:
 
 # Mistral — optionnel
 try:
-    from mistralai import Mistral
+    try:
+        from mistralai import Mistral
+    except ImportError:
+        from mistralai.client import Mistral
     MISTRAL_AVAILABLE = True
 except ImportError:
     MISTRAL_AVAILABLE = False
