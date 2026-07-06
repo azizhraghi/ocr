@@ -1037,10 +1037,13 @@ def print_section(title: str):
 def print_results(
     easyocr_result: dict,
     trocr_result: dict | None,
+    gemini_result: dict | None,
+    mistral_result: dict | None,
     nlp_result: dict,
     grade: tuple[str, str],
     error_rates: dict | None,
-    cross_agreement: dict | None,
+    multi_agreement: dict,
+    ai_analysis: dict | None,
     verbose: bool = False,
 ):
     """Affiche le dashboard complet des résultats."""
@@ -1060,6 +1063,28 @@ def print_results(
             print(f"  \"{trocr_result['text']}\"")
         else:
             print("  (aucun texte détecté)")
+            
+    if gemini_result:
+        print_section("Gemini Vision")
+        if gemini_result.get("text") and not gemini_result.get("error"):
+            print(f"  \"{gemini_result['text']}\"")
+        else:
+            print(f"  {gemini_result.get('text', '(erreur)')}")
+            
+    if mistral_result:
+        print_section("Mistral OCR")
+        if mistral_result.get("text") and not mistral_result.get("error"):
+            print(f"  \"{mistral_result['text']}\"")
+        else:
+            print(f"  {mistral_result.get('text', '(erreur)')}")
+            
+    if ai_analysis and not ai_analysis.get("error"):
+        print_section("🤖 Texte probable (AI Analysis)")
+        print(f"  \"{ai_analysis.get('best_text', '')}\"")
+        if ai_analysis.get("corrections"):
+            print("\n  Corrections:")
+            for c in ai_analysis["corrections"]:
+                print(f"  • {c}")
     
     # ── Métriques de qualité ──
     print_header("📊 MÉTRIQUES DE QUALITÉ")
@@ -1069,6 +1094,10 @@ def print_results(
     grade_colors = {"A": "🟢", "B": "🔵", "C": "🟡", "D": "🟠", "F": "🔴"}
     grade_icon = grade_colors.get(grade_letter, "⚪")
     print(f"\n  {grade_icon} Grade global : {grade_letter} — {grade_desc}")
+    
+    if ai_analysis and not ai_analysis.get("error"):
+        trust = ai_analysis.get("trust_score", 0)
+        print(f"  🤖 AI Trust Score : {trust*100:.0f}%")
     
     # Tableau des métriques
     print_section("Détails")
@@ -1081,6 +1110,10 @@ def print_results(
         ("Temps EasyOCR", f"{easyocr_result['elapsed_seconds']}s"),
     ]
     
+    if gemini_result:
+        metrics.append(("Temps Gemini", f"{gemini_result.get('elapsed_seconds', 0)}s"))
+    if mistral_result:
+        metrics.append(("Temps Mistral", f"{mistral_result.get('elapsed_seconds', 0)}s"))
     if trocr_result:
         metrics.append(("Temps TrOCR", f"{trocr_result['elapsed_seconds']}s"))
         metrics.append(("Tentatives TrOCR", str(trocr_result['attempts'])))
@@ -1089,10 +1122,11 @@ def print_results(
         print(f"  {label:<35} {value:>10}")
     
     # Concordance inter-moteurs
-    if cross_agreement:
-        print_section("Concordance inter-moteurs")
-        print(f"  Similarité : {cross_agreement['similarity_percent']}")
-        print(f"  {cross_agreement['status']}")
+    if multi_agreement and multi_agreement.get("best_pair"):
+        print_section("Concordance inter-moteurs (Meilleure paire)")
+        e1, e2, sim = multi_agreement["best_pair"]
+        print(f"  Moteurs: {e1} ↔ {e2}")
+        print(f"  Similarité : {sim*100:.1f}%")
     
     # CER / WER
     if error_rates:
@@ -1252,6 +1286,16 @@ def main():
     print_section("Moteurs OCR")
     easyocr_result = ocr_easyocr(ocr_image_path, languages=args.lang)
     
+    # ── 2.B Gemini Vision ──
+    gemini_result = None
+    if os.environ.get("GEMINI_API_KEY"):
+        gemini_result = ocr_gemini(ocr_image_path)
+        
+    # ── 2.C Mistral OCR ──
+    mistral_result = None
+    if os.environ.get("MISTRAL_API_KEY"):
+        mistral_result = ocr_mistral(ocr_image_path)
+    
     # ── 3. TrOCR (optionnel) ──
     trocr_result = None
     if not args.no_trocr:
@@ -1282,21 +1326,32 @@ def main():
         error_rates = compute_error_rates(primary_text, args.ground_truth)
     
     # ── 8. Concordance inter-moteurs ──
-    cross_agreement = None
-    if trocr_result and trocr_result["text"]:
-        cross_agreement = compute_cross_engine_agreement(
-            easyocr_result["text"],
-            trocr_result["text"],
-        )
+    all_results = {"EasyOCR": easyocr_result}
+    if gemini_result and not gemini_result.get("error"):
+        all_results["Gemini"] = gemini_result
+    if mistral_result and not mistral_result.get("error"):
+        all_results["Mistral"] = mistral_result
+    if trocr_result:
+        all_results["TrOCR"] = trocr_result
+        
+    multi_agreement = compute_multi_engine_agreement(all_results)
+    
+    # ── 8.B AI Analysis (si Gemini présent) ──
+    ai_analysis = None
+    if os.environ.get("GEMINI_API_KEY") and len(all_results) > 1:
+        ai_analysis = analyze_with_ai(all_results, image_path=ocr_image_path)
     
     # ── 9. Affichage du dashboard ──
     print_results(
         easyocr_result=easyocr_result,
         trocr_result=trocr_result,
+        gemini_result=gemini_result,
+        mistral_result=mistral_result,
         nlp_result=nlp_result,
         grade=grade,
         error_rates=error_rates,
-        cross_agreement=cross_agreement,
+        multi_agreement=multi_agreement,
+        ai_analysis=ai_analysis,
         verbose=args.verbose,
     )
     
