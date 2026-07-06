@@ -20,6 +20,8 @@ import os
 import sys
 import tempfile
 import time
+import json
+from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
@@ -639,6 +641,30 @@ if uploaded_file is not None:
                         image_path=temp_path,
                         api_key=gemini_key,
                     )
+            
+            # ── 12. Save History ──
+            history_file = "ocr_history.json"
+            try:
+                history = []
+                if os.path.exists(history_file):
+                    with open(history_file, "r", encoding="utf-8") as f:
+                        history = json.load(f)
+                
+                # Append current result
+                history.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "filename": uploaded_file.name,
+                    "grade": grade_letter,
+                    "avg_confidence": easyocr_result["avg_confidence"],
+                    "trust_score": ai_analysis.get("trust_score", 0) if ai_analysis and not ai_analysis.get("error") else 0,
+                    "engines_used": [eng for eng, res in all_results.items() if res and not res.get("error")],
+                    "text": ai_analysis.get("best_text", primary_text) if ai_analysis and not ai_analysis.get("error") else primary_text
+                })
+                
+                with open(history_file, "w", encoding="utf-8") as f:
+                    json.dump(history, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                st.warning(f"Impossible de sauvegarder l'historique: {e}")
 
             # Store in session state
             st.session_state["results"] = {
